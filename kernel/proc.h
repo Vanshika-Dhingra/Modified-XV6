@@ -117,15 +117,8 @@ struct proc
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
   int trace_mask;//defined for strace
-  uint ltime; // Total lifetime of the process
-  uint rtime; // How long the process ran for
-  uint ctime; // When was the process created
-  uint etime; // When did the process exited
-  uint stime; // How long the process was sleeping for
-  uint ntime; // nap time; time since the last sleep
-  // procdump
-  uint nrun; // number of times process is picked by scheduler
-  // priority
-  uint nice; // Niceness (default: 5)
-  uint stp;  // Static Priority (default: 60)
+  int is_sigalarm; // set when now_ticks > ticks
+  int diff;//differnce bwtween the no of ticks passed by syscall and the current ticks
+  uint64 handler;  //to store handler function address
+  struct trapframe *trapframe_copy;// we need a new trapframe to store the registers when the handler function expires
 };

@@ -103,6 +103,8 @@ extern uint64 sys_unlink(void);
 extern uint64 sys_link(void);
 extern uint64 sys_mkdir(void);
 extern uint64 sys_close(void);
+extern uint64 sys_sigalarm(void);
+extern uint64 sys_sigreturn(void);
 
 // prototype for the strace function it handles the system call
 extern uint64 sys_trace(void);
@@ -133,7 +135,8 @@ static uint64 (*syscalls[])(void) = {
     [SYS_close] sys_close,
    //adding an element to the array for strace
     [SYS_trace] sys_trace,
-   
+    [SYS_sigalarm]   sys_sigalarm,
+    [SYS_sigreturn]   sys_sigreturn,
 };
 
 // we make an array syscall_name which contains the names of all the system calls
@@ -161,8 +164,6 @@ char *syscall_name[] = {
     [SYS_mkdir] "mkdir",
     [SYS_close] "close",
     [SYS_trace] "trace",
-    [SYS_waitx] "waitx",
-    [SYS_set_priority] "set_priority",
 };
 
 // Stores the number of arguments corresponsing

@@ -53,7 +53,7 @@ void procinit(void)
   for (p = proc; p < &proc[NPROC]; p++)
   {
     initlock(&p->lock, "proc");
-    p->trace_mask = 0;// instialise the trace_mask
+    p->trace_mask = 0; // instialise the trace_mask
     p->state = UNUSED;
     p->kstack = KSTACK((int)(p - proc));
   }
@@ -135,6 +135,18 @@ found:
     release(&p->lock);
     return 0;
   }
+  // we generate a copy of trapframe similar to the above process
+  if ((p->trapframe_copy = (struct trapframe *)kalloc()) == 0)
+  {
+    release(&p->lock);
+    return 0;
+  }
+  // initilaising the newly made variables
+  p->is_sigalarm = 0;
+  p->diff = 0;
+  // p->ticks = 0;
+  // p->now_ticks = 0;
+  p->handler = 0;
 
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
@@ -162,6 +174,8 @@ freeproc(struct proc *p)
 {
   if (p->trapframe)
     kfree((void *)p->trapframe);
+  if (p->trapframe_copy)
+    kfree((void *)p->trapframe_copy);
   p->trapframe = 0;
   if (p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
@@ -174,8 +188,16 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->trapframe = 0;
 }
 
+uint64 sys_sigalarm(void)
+{
+  myproc()->is_sigalarm = 0;
+  myproc()->diff = myproc()->trapframe->a0; // getting the value of the first parameter of function that corresponds to the no of ticks
+  myproc()->handler = myproc()->trapframe->a1; // getting the value of the second parameter of the function which corresponds to the handler
+  return 0;
+}
 // Create a user page table for a given process, with no user memory,
 // but with trampoline and trapframe pages.
 pagetable_t
@@ -307,7 +329,7 @@ int fork(void)
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
 
-  //copy the trace mask
+  // copy the trace mask
   np->trace_mask = p->trace_mask;
 
   // Cause fork to return 0 in the child.
