@@ -5,12 +5,15 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "rand.h"
+#include <stddef.h>
 
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
 
 struct proc *initproc;
+struct Queue mlfq[5];
 
 int nextpid = 1;
 struct spinlock pid_lock;
@@ -53,7 +56,15 @@ void procinit(void)
     for (p = proc; p < &proc[NPROC]; p++)
     {
         initlock(&p->lock, "proc");
+        p->mask = 0; // instialise the trace_mask
+        p->state = UNUSED;
         p->kstack = KSTACK((int)(p - proc));
+    }
+    for (int i = 0; i < 5; i++)
+    {
+        mlfq[i].size = 0;
+        mlfq[i].head = 0;
+        mlfq[i].tail = 0;
     }
 }
 
@@ -125,12 +136,13 @@ allocproc(void)
 found:
     p->pid = allocpid();
     p->state = USED;
-    p->createTime = ticks;
+    p->ctime = ticks;
     p->runTime = 0;
     p->sleepTime = 0;
     p->totalRunTime = 0;
-    p->num_runs = 0;
+    p->numRuns = 0;
     p->priority = 60;
+    p->tickets = 1;
 
     // Allocate a trapframe page.
     if ((p->trapframe = (struct trapframe *)kalloc()) == 0)
@@ -145,11 +157,10 @@ found:
         release(&p->lock);
         return 0;
     }
-    p->is_sigalarm = 0;
+    p->is_alarm = 0;
     p->ticks = 0;
-    p->now_ticks = 0;
+    p->presentTicks = 0;
     p->handler = 0;
-    p->diff=p->ticks;
 
     // An empty user page table.
     p->pagetable = proc_pagetable(p);
@@ -165,17 +176,24 @@ found:
     memset(&p->context, 0, sizeof(p->context));
     p->context.ra = (uint64)forkret;
     p->context.sp = p->kstack + PGSIZE;
+    p->priority = 0;
+    p->in_queue = 0;
+    p->quanta = 1;
+    p->nrun = 0;
+    p->qitime = ticks;
+    for (int i = 0; i < 5; i++)
+        p->qrtime[i] = 0;
 
     return p;
 }
 
 uint64 sys_sigalarm(void)
 {
-    myproc()->is_sigalarm = 0;
+    myproc()->is_alarm = 0;
     myproc()->ticks = myproc()->trapframe->a0;
-    myproc()->now_ticks = 0;
+    myproc()->diff = myproc()->trapframe->a0;
+    myproc()->presentTicks = 0;
     myproc()->handler = myproc()->trapframe->a1;
-    myproc()->diff=myproc()->trapframe->a0;
     return 0;
 }
 // free a proc structure and the data hanging from it,
@@ -527,7 +545,7 @@ void scheduler(void)
                 if (p->state == RUNNABLE)
                 {
                     // FCFS scheduling
-                    if (least->createTime > p->createTime)
+                    if (least->ctime > p->ctime)
                     {
                         least = p;
                     }
@@ -544,7 +562,7 @@ void scheduler(void)
                 if (p->state == RUNNABLE)
                 {
                     // FCFS scheduling
-                    if (least == 0 || least->createTime > p->createTime)
+                    if (least == 0 || least->ctime > p->ctime)
                     {
                         least = p;
                     }
@@ -559,53 +577,148 @@ void scheduler(void)
         }
 #endif
 #ifdef PBS
-        struct proc *NodeProc = 0;  // the process with the highest priority
-        int dynamic_priority = 101; // the highest priority
+        struct proc *final = 0;
+        int dynamicPriority = 101;
         for (p = proc; p < &proc[NPROC]; p++)
         {
-            acquire(&p->lock); // lock the chosen process
+            acquire(&p->lock);
 
-            int nice = 5; // default nice value
+            p->nice = 5;
 
-            if (p->runTime + p->sleepTime)
-                nice = ((10 * p->sleepTime) / (p->sleepTime + p->runTime)); // calculate nice value
+            p->nice = ((10 * p->sleepTime) / (p->sleepTime + p->runTime)); // calculate the nice value
 
-            int t = (p->priority - nice + 5) < 100 ? (p->priority - nice + 5) : 100; // calculate priority
-            int process_dp = 0 > t ? 0 : t;
+            int t = (p->priority - p->nice + 5) < 100 ? (p->priority - p->nice + 5) : 100; // calculate priority
+            int current_dp = 0 > t ? 0 : t;
 
+            int flag = 0;
+            int flag1 = 0;
+            if (dynamicPriority == current_dp)
+            {
+                if (final->numRuns > p->numRuns)
+                    flag = 1;
+                else if (final->numRuns == p->numRuns && final->ctime > p->ctime)
+                    flag1 = 1;
+            }
             if (p->state == RUNNABLE)
-                if (
-                    NodeProc == 0 ||
-                    dynamic_priority > process_dp ||
-                    (dynamic_priority == process_dp && NodeProc->num_runs > p->num_runs) ||
-                    (dynamic_priority == process_dp &&
-                     NodeProc->num_runs == p->num_runs &&
-                     NodeProc->createTime > p->createTime))
+            {
+                if (final == 0 || dynamicPriority > current_dp || flag == 1 || flag1 == 1)
                 {
-
-                    if (NodeProc)
-                        release(&NodeProc->lock); // release the lock of the previous process
-
-                    dynamic_priority = process_dp; // set the dynamic priority
-                    NodeProc = p;                  // set the process with the highest priority
+                    if (final)
+                    {
+                        release(&final->lock);
+                    }
+                    dynamicPriority = current_dp;
+                    final = p;
                     continue;
                 }
-            release(&p->lock); // release the lock
+            }
+            release(&p->lock);
         }
-        if (NodeProc)
-        {                                           // if there is a process with the highest priority
-            NodeProc->state = RUNNING;              // set the process with the highest priority to running
-            NodeProc->startTime = ticks;            // set the start time of the process with the highest priority
-            NodeProc->num_runs++;                   // increase the number of runs of the process with the highest priority
-            NodeProc->runTime = 0;                  // set the run time of the process with the highest priority to 0
-            NodeProc->sleepTime = 0;                // set the sleep time of the process with the highest priority to 0
-            c->proc = NodeProc;                     // set the current process to the process with the highest priority
-            swtch(&c->context, &NodeProc->context); // switch to the process with the highest priority
-            // Process is done running for now.
-            // It should have changed its p->state before coming back.
-            c->proc = 0;              // no longer running
-            release(&NodeProc->lock); // release the lock of the process with the highest priority
+        if (final)
+        {
+            final->state = RUNNING;
+            final->numRuns++;
+            final->runTime = 0;
+            final->sleepTime = 0;
+            c->proc = final;
+            swtch(&c->context, &final->context);
+            c->proc = 0;
+            release(&final->lock);
         }
+#endif
+#ifdef LBS
+        int count_tickets = 0;
+        int tTickets = 0;
+
+        for (p = proc; p < &proc[NPROC]; p++)
+        {
+            if (p->state == RUNNABLE)
+                tTickets = tTickets + p->tickets;
+        }
+
+        long long int random = random_at_most(tTickets);
+
+        for (p = proc; p < &proc[NPROC]; p++)
+        {
+            acquire(&p->lock);
+            if (p->state == RUNNABLE)
+            {
+                count_tickets += p->tickets;
+            }
+            else if (p->state != RUNNABLE)
+            {
+                release(&p->lock);
+                continue;
+            }
+            if (count_tickets < random)
+            {
+                release(&p->lock);
+                continue;
+            }
+            c->proc = p;
+            p->state = RUNNING;
+            swtch(&c->context, &p->context);
+            c->proc = 0;
+            release(&p->lock);
+            break;
+        }
+#endif
+#ifdef MLFQ
+        struct proc *chosen = 0;
+        // Reset priority for old processes /Aging/
+        for (p = proc; p < &proc[NPROC]; p++)
+        {
+            if (p->state == RUNNABLE && ticks - p->qitime >= 64)
+            {
+                p->qitime = ticks;
+                if (p->in_queue)
+                {
+                    qrm(&mlfq[p->priority], p->pid);
+                    p->in_queue = 0;
+                }
+                if (p->priority != 0)
+                    p->priority--;
+            }
+        }
+        for (p = proc; p < &proc[NPROC]; p++)
+        {
+            acquire(&p->lock);
+            if (p->state == RUNNABLE && p->in_queue == 0)
+            {
+                qpush(&mlfq[p->priority], p);
+                p->in_queue = 1;
+            }
+            release(&p->lock);
+        }
+        for (int level = 0; level < 5; level++)
+        {
+            while (mlfq[level].size)
+            {
+                p = top(&mlfq[level]);
+                acquire(&p->lock);
+                qpop(&mlfq[level]);
+                p->in_queue = 0;
+                if (p->state == RUNNABLE)
+                {
+                    p->qitime = ticks;
+                    chosen = p;
+                    break;
+                }
+                release(&p->lock);
+            }
+            if (chosen)
+                break;
+        }
+        if (!chosen)
+            continue;
+        chosen->quanta = 1 << chosen->priority;
+        chosen->state = RUNNING;
+        c->proc = chosen;
+        chosen->nrun++;
+        swtch(&c->context, &chosen->context);
+        c->proc = 0;
+        chosen->qitime = ticks;
+        release(&chosen->lock);
 #endif
     }
 }
@@ -784,6 +897,7 @@ void procdump(void)
 {
     static char *states[] = {
         [UNUSED] "unused",
+        [USED] "used",
         [SLEEPING] "sleep ",
         [RUNNABLE] "runble",
         [RUNNING] "run   ",
@@ -802,30 +916,52 @@ void procdump(void)
             state = "???";
 
 #if defined RR || defined FCFS
-        int wtime = ticks - p->createTime - p->totalRunTime;
-        printf("%d\t%s\t%d\t%d\t%d\n", p->pid, state, p->totalRunTime, wtime, p->num_runs);
+        int wtime = ticks - p->ctime - p->totalRunTime;
+        printf("%d\t%s\t%d\t%d\t%d\n", p->pid, state, p->totalRunTime, wtime, p->numRuns);
 #endif
 #ifdef PBS
-        int wtime = ticks - p->createTime - p->totalRunTime;
-        printf("%d\t%d\t%s\t%d\t%d\t%d\n", p->pid, p->priority, state, p->totalRunTime, wtime, p->num_runs);
+        int wtime = ticks - p->ctime - p->totalRunTime;
+        printf("%d\t%d\t%s\t%d\t%d\t%d\n", p->pid, p->priority, state, p->totalRunTime, wtime, p->numRuns);
+#endif
+#ifdef LBS
+        int wtime = ticks - p->ctime - p->totalRunTime;
+        printf("%d\t%d\t%s\t%d\t%d\t%d\n", p->pid, p->priority, state, p->totalRunTime, wtime, p->numRuns);
+#endif
+#ifdef MLFQ
+        int wtime = ticks - p->ctime - p->totalRunTime;
+        printf("%d\t%d\t%s\t%d\t%d\t%d\n", p->pid, p->priority, state, p->totalRunTime, wtime, p->numRuns);
 #endif
     }
 }
 
-void update_time()
+void update_time(void)
 {
     struct proc *p;
     for (p = proc; p < &proc[NPROC]; p++)
     {
-        acquire(&p->lock);        // lock the process
-        if (p->state == SLEEPING) // if the Process is sleeping
-            p->sleepTime++;       // increment the sleepTime
-        if (p->state == RUNNING)  // if the Process is running
+        acquire(&p->lock);
+        if (p->state == RUNNING)
         {
-            p->runTime++;      // increment the runTime
-            p->totalRunTime++; // increment the totalRunTime
+            p->trtime++;
+            p->totalRunTime++;
+#ifdef PBS
+            p->rtime++;
+#endif
+#ifdef MLFQ
+            p->qrtime[p->priority]++;
+            p->quanta--;
+#endif
         }
-        release(&p->lock); // unlock the process
+#ifdef PBS
+        else if (p->state == SLEEPING)
+        {
+            p->wtime++;
+        }
+#endif
+#ifdef MLFQ
+
+#endif
+        release(&p->lock);
     }
 }
 
@@ -835,17 +971,20 @@ int set_priority(int new_priority, int pid)
     struct proc *p;
     for (p = proc; p < &proc[NPROC]; p++)
     {
-        acquire(&p->lock); // lock the process
+        acquire(&p->lock);
         if (p->pid == pid)
-        {                               // if the process is found
-            t = p->priority;            // save the old priority
-            p->priority = new_priority; // set the new priority
-            release(&p->lock);          // unlock the process
-            if (t > new_priority)       // if the new priority is lower
-                yield();                // yield the CPU
+        {
+            t = p->priority;
+            p->priority = new_priority;
+            p->nice = 5;
+            release(&p->lock);
+            if (t > new_priority)
+            {
+                yield();
+            }
             break;
         }
-        release(&p->lock); // unlock the process
+        release(&p->lock);
     }
     return t;
 }
@@ -875,7 +1014,7 @@ int waitx(uint64 addr, uint *runTime, uint *wtime)
                     // Found one.
                     pid = np->pid;
                     *runTime = np->totalRunTime;
-                    *wtime = np->exitTime - np->createTime - np->totalRunTime;
+                    *wtime = np->exitTime - np->ctime - np->totalRunTime;
                     if (addr != 0 && copyout(p->pagetable, addr, (char *)&np->xstate,
                                              sizeof(np->xstate)) < 0)
                     {
@@ -902,4 +1041,51 @@ int waitx(uint64 addr, uint *runTime, uint *wtime)
         // Wait for a child to exit.
         sleep(p, &wait_lock); // DOC: wait-sleep
     }
+}
+
+struct proc *top(struct Queue *q)
+{
+    if (q->head == q->tail)
+        return 0;
+    return q->procs[q->head];
+}
+
+void qpush(struct Queue *q, struct proc *element)
+{
+    if (q->size == NPROC)
+        panic("Proccess limit exceeded");
+
+    q->procs[q->tail] = element;
+    q->tail++;
+    if (q->tail == NPROC + 1)
+        q->tail = 0;
+    q->size++;
+}
+
+void qpop(struct Queue *q)
+{
+    if (q->size == 0)
+        panic("Empty queue");
+    q->head++;
+    if (q->head == NPROC + 1)
+        q->head = 0;
+    q->size--;
+}
+
+void qrm(struct Queue *q, int pid)
+{
+    for (int curr = q->head; curr != q->tail; curr = (curr + 1) % (NPROC + 1))
+    {
+        if (q->procs[curr]->pid == pid)
+        {
+            struct proc *temp = q->procs[curr];
+            q->procs[curr] = q->procs[(curr + 1) % (NPROC + 1)];
+            q->procs[(curr + 1) % (NPROC + 1)] = temp;
+        }
+    }
+
+    q->tail--;
+    q->size--;
+    if (q->tail < 0)
+        q->tail = NPROC;
 }

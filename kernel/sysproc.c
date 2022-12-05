@@ -10,12 +10,8 @@
 uint64 sys_sigreturn(void)
 {
   struct proc *p = myproc();
-  p->trapframe_copy->kernel_satp = p->trapframe->kernel_satp;
-  p->trapframe_copy->kernel_sp = p->trapframe->kernel_sp;
-  p->trapframe_copy->kernel_trap = p->trapframe->kernel_trap;
-  p->trapframe_copy->kernel_hartid = p->trapframe->kernel_hartid;
   *(p->trapframe) = *(p->trapframe_copy);
-  myproc()->is_sigalarm = 0;
+  myproc()->is_alarm = 0;
   return myproc()->trapframe_copy->a0;
 }
 
@@ -23,10 +19,10 @@ uint64
 sys_exit(void)
 {
   int n;
-  if(argint(0, &n) < 0)
+  if (argint(0, &n) < 0)
     return -1;
   exit(n);
-  return 0;  // not reached
+  return 0; // not reached
 }
 
 uint64
@@ -45,7 +41,7 @@ uint64
 sys_wait(void)
 {
   uint64 p;
-  if(argaddr(0, &p) < 0)
+  if (argaddr(0, &p) < 0)
     return -1;
   return wait(p);
 }
@@ -56,10 +52,10 @@ sys_sbrk(void)
   int addr;
   int n;
 
-  if(argint(0, &n) < 0)
+  if (argint(0, &n) < 0)
     return -1;
   addr = myproc()->sz;
-  if(growproc(n) < 0)
+  if (growproc(n) < 0)
     return -1;
   return addr;
 }
@@ -70,12 +66,14 @@ sys_sleep(void)
   int n;
   uint ticks0;
 
-  if(argint(0, &n) < 0)
+  if (argint(0, &n) < 0)
     return -1;
   acquire(&tickslock);
   ticks0 = ticks;
-  while(ticks - ticks0 < n){
-    if(myproc()->killed){
+  while (ticks - ticks0 < n)
+  {
+    if (myproc()->killed)
+    {
       release(&tickslock);
       return -1;
     }
@@ -90,13 +88,11 @@ sys_kill(void)
 {
   int pid;
 
-  if(argint(0, &pid) < 0)
+  if (argint(0, &pid) < 0)
     return -1;
   return kill(pid);
 }
 
-// return how many clock tick interrupts have occurred
-// since start.
 uint64
 sys_uptime(void)
 {
@@ -111,16 +107,8 @@ sys_uptime(void)
 uint64
 sys_trace(void)
 {
-  int n;
-  if (argint(0, &n) < 0)
-  { // in case of error
-    return -1;
-  }
-  else
-  {
-    myproc()->mask = n; // value of the register a0 is stored in n
-    return 0;
-  } // we set trace_mask equal to n
+  myproc()->mask = myproc()->trapframe->a0;
+  return 0;
 }
 
 uint64
@@ -128,17 +116,17 @@ sys_waitx(void)
 {
   uint64 addr, addr1, addr2;
   uint wtime, rtime;
-  if(argaddr(0, &addr) < 0)
+  if (argaddr(0, &addr) < 0)
     return -1;
-  if(argaddr(1, &addr1) < 0) // user virtual memory
+  if (argaddr(1, &addr1) < 0) // user virtual memory
     return -1;
-  if(argaddr(2, &addr2) < 0)
+  if (argaddr(2, &addr2) < 0)
     return -1;
   int ret = waitx(addr, &wtime, &rtime);
-  struct proc* p = myproc();
-  if (copyout(p->pagetable, addr1,(char*)&wtime, sizeof(int)) < 0)
+  struct proc *p = myproc();
+  if (copyout(p->pagetable, addr1, (char *)&wtime, sizeof(int)) < 0)
     return -1;
-  if (copyout(p->pagetable, addr2,(char*)&rtime, sizeof(int)) < 0)
+  if (copyout(p->pagetable, addr2, (char *)&rtime, sizeof(int)) < 0)
     return -1;
   return ret;
 }
@@ -147,25 +135,37 @@ uint64
 sys_set_priority()
 {
   int priority, pid;
-  int oldpriority = 101;
-  if(argint(0, &priority) < 0 || argint(1, &pid) < 0)
+  int o_priority = 101;
+  if (argint(0, &priority) < 0)
+    return -1;
+  if (argint(1, &pid) < 0)
     return -1;
 
-  for(struct proc *p = proc; p < &proc[NPROC]; p++)
+  for (struct proc *p = proc; p < &proc[NPROC]; p++)
   {
     acquire(&p->lock);
 
-    if(p->pid == pid && priority >= 0 && priority <= 100)
+    if (p->pid == pid && priority >= 0 && priority <= 100)
     {
-      p->sleepTime = 0;
-      p->runTime = 0;
-      oldpriority = p->priority;
+      o_priority = p->priority;
       p->priority = priority;
+      p->nice=5;
     }
 
     release(&p->lock);
   }
-  if(oldpriority > priority)
-  yield();
-  return oldpriority;
+  if (o_priority > priority)
+  {
+    yield();
+  }
+  return o_priority;
+}
+
+int sys_settickets(void)
+{
+  int n;
+  if (argint(0, &n) < 0)
+    return -1;
+  proc->tickets = n;
+  return n;
 }

@@ -8,6 +8,7 @@
 
 struct spinlock tickslock;
 uint ticks;
+extern struct Queue mlfq[5];
 
 extern char trampoline[], uservec[], userret[];
 
@@ -67,9 +68,12 @@ void usertrap(void)
   else if ((which_dev = devintr()) != 0)
   {
     // ok
-  }
-  else
-  {
+}else if(r_scause()==15||r_scause()==13){
+    int res = page_fault_handler((void*)r_stval(),p->pagetable);
+    if(res == -1 || res==-2){
+      p->killed=1;
+    }
+ }else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
@@ -79,17 +83,39 @@ void usertrap(void)
     exit(-1);
 
 // give up the CPU if this is a timer interrupt.
-#if defined RR || MLFQ
+#if defined RR || LBS 
   if (which_dev == 2)
   {
-    p->now_ticks += 1;
-    if (p->now_ticks >= p->ticks && !p->is_sigalarm)
+    p->presentTicks++;
+    p->diff--;
+    if (0 >= p->diff)
     {
-      p->is_sigalarm = 1;
-      *(p->trapframe_copy) = *(p->trapframe);
-      p->trapframe->epc = p->handler;
+      if (p->ticks > 0 && !p->is_alarm)
+      {
+        p->is_alarm = 1;
+        *(p->trapframe_copy) = *(p->trapframe);
+        p->trapframe->epc = p->handler;
+      }
     }
     yield();
+  }
+#endif
+#ifdef MLFQ
+  if (which_dev == 2 && myproc() && myproc()->state == RUNNING)
+  {
+    struct proc* p = myproc();
+    if (p->quanta <= 0)
+    {
+      p->priority = p->priority +1 != 5? p->priority + 1: p->priority;
+      yield();
+    }
+    for (int i = 0; i < p->priority;i++)
+    {
+      if(mlfq[i].size)
+      {
+        yield();
+      }
+    }
   }
 #endif
 
@@ -161,12 +187,29 @@ void kerneltrap()
     panic("kerneltrap");
   }
 
-#if defined RR || MLFQ
+if (which_dev == 2 && myproc() != 0 && myproc()->state == RUNNING){
+#if defined RR || LBS
   // give up the CPU if this is a timer interrupt.
-  if (which_dev == 2 && myproc() != 0 && myproc()->state == RUNNING)
     yield();
 #endif
-
+#ifdef MLFQ
+  {
+    struct proc* p = myproc();
+    if (p->quanta <= 0)
+    {
+      p->priority = p->priority +1 != 5? p->priority + 1: p->priority;
+      yield();
+    }
+    for (int i = 0; i < p->priority;i++)
+    {
+      if(mlfq[i].size)
+      {
+        yield();
+      }
+    }
+  }
+#endif
+}
   // the yield() may have caused some traps to occur,
   // so restore trap registers for use by kernelvec.S's sepc instruction.
   w_sepc(sepc);
@@ -240,4 +283,39 @@ int devintr()
   {
     return 0;
   }
+}
+
+int page_fault_handler(void*va,pagetable_t pagetable){
+ 
+  struct proc* p = myproc();
+  if((uint64)va>=MAXVA||((uint64)va>=PGROUNDDOWN(p->trapframe->sp)-PGSIZE&&(uint64)va<=PGROUNDDOWN(p->trapframe->sp))){
+    return -2;
+  }
+
+  pte_t *pte;
+  uint64 pa;
+ uint flags;
+  va = (void*)PGROUNDDOWN((uint64)va);
+  pte = walk(pagetable,(uint64)va,0);
+  if(pte == 0){
+    return -1;
+  }
+  pa = PTE2PA(*pte);
+  if(pa == 0){
+    return -1;
+  }
+  flags = PTE_FLAGS(*pte);
+  if(flags&PTE_C){
+    flags = (flags|PTE_W)&(~PTE_C);
+    char*mem;
+    mem = kalloc();
+    if(mem==0){
+      return -1;
+    }
+    memmove(mem,(void*)pa,PGSIZE); 
+    *pte = PA2PTE(mem)|flags;
+    kfree((void*)pa);
+    return 0;
+  }
+  return 0;
 }

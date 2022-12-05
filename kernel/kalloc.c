@@ -9,6 +9,11 @@
 #include "riscv.h"
 #include "defs.h"
 
+struct {
+  struct spinlock lock;
+  int count[PGROUNDUP(PHYSTOP)>>12];
+} page_ref;
+
 void freerange(void *pa_start, void *pa_end);
 
 extern char end[]; // first address after kernel.
@@ -26,6 +31,7 @@ struct {
 void
 kinit()
 {
+  init_page_ref();
   initlock(&kmem.lock, "kmem");
   freerange(end, (void*)PHYSTOP);
 }
@@ -35,8 +41,10 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
-    kfree(p);
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE){
+   inc_page_ref(p);
+   kfree(p);
+  }
 }
 
 // Free the page of physical memory pointed at by v,
@@ -50,7 +58,16 @@ kfree(void *pa)
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
-
+  acquire(&page_ref.lock);
+  if(page_ref.count[(uint64)pa>>12]<=0){
+    panic("dec_page_ref");
+  }
+  page_ref.count[(uint64)pa>>12]-=1;
+  if(page_ref.count[(uint64)pa>>12]>0){
+    release(&page_ref.lock);
+    return;
+  }
+  release(&page_ref.lock);
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
 
@@ -77,6 +94,46 @@ kalloc(void)
   release(&kmem.lock);
 
   if(r)
+  {
     memset((char*)r, 5, PGSIZE); // fill with junk
+    inc_page_ref((void*)r);
+  }
   return (void*)r;
+}
+
+void init_page_ref(){
+  initlock(&page_ref.lock, "page_ref");
+  acquire(&page_ref.lock);
+  for(int i=0;i<(PGROUNDUP(PHYSTOP)>>12);++i)
+    page_ref.count[i]=0;
+  release(&page_ref.lock);
+}
+
+
+void dec_page_ref(void*pa){
+  acquire(&page_ref.lock);
+  if(page_ref.count[(uint64)pa>>12]<=0){
+    panic("dec_page_ref");
+  }
+  page_ref.count[(uint64)pa>>12]-=1;
+  release(&page_ref.lock);
+}
+
+void inc_page_ref(void*pa){
+  acquire(&page_ref.lock);
+  if(page_ref.count[(uint64)pa>>12]<0){
+    panic("inc_page_ref");
+  }
+  page_ref.count[(uint64)pa>>12]+=1;
+  release(&page_ref.lock);
+}
+
+int get_page_ref(void*pa){
+  acquire(&page_ref.lock);
+  int res = page_ref.count[(uint64)pa>>12];
+  if(page_ref.count[(uint64)pa>>12]<0){
+    panic("get_page_ref");
+  }
+  release(&page_ref.lock);
+  return res;
 }
