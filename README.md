@@ -1,5 +1,5 @@
 # REPORT 
-### Vamshika Dhingra (2021101092)
+### Vanshika Dhingra (2021101092)
 ### Vrinda Agarwal (2021101110)
 
 >MacOS Monterey
